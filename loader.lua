@@ -4,63 +4,83 @@
     Compatible: Delta, Fluxus, Hydrogen
     
     INSTRUÇÕES:
-    1. Coloque main.lua no GitHub
-    2. Substitua URL abaixo pela sua URL RAW
-    3. Execute este loader
+    1. Certifique-se que o main.lua está no seu GitHub
+    2. O link abaixo já está configurado (substitua se mudar o user/repo)
 ]]
 
--- Anti-Double Load
-if getgenv().BloxUltLoaded then return end
+-- 1. Anti-Double Load
+if getgenv().BloxUltLoaded then 
+    warn("[Loader] Script is already running!")
+    return 
+end
 getgenv().BloxUltLoaded = true
 
--- Wait for game
+-- 2. Wait for Game
 if not game:IsLoaded() then game.Loaded:Wait() end
-task.wait(0.5)
+task.wait(1) -- Pequeno delay extra para garantir que a UI carregou
 
--- Verify Blox Fruits
+-- 3. Verify Blox Fruits
 local placeId = game.PlaceId
 local isBlox = (placeId == 2753915549 or placeId == 4442272183 or placeId == 7449423635)
+
 if not isBlox then
+    -- Fallback check (Nome do jogo)
     pcall(function()
         local n = game:GetService("MarketplaceService"):GetProductInfo(placeId).Name or ""
         isBlox = n:lower():find("blox") and n:lower():find("fruit")
     end)
 end
+
 if not isBlox then
-    warn("[Loader] Only works on Blox Fruits!")
+    warn("[Loader] Error: This script only works on Blox Fruits!")
     getgenv().BloxUltLoaded = nil
     return
 end
 
--- Notify
-pcall(function()
-    game:GetService("StarterGui"):SetCore("SendNotification", {
-        Title = "💎 Loading...",
-        Text = "Blox Fruits Ultimate v10.0",
-        Duration = 3
-    })
+-- 4. Notification (Safe)
+task.spawn(function()
+    pcall(function()
+        game:GetService("StarterGui"):SetCore("SendNotification", {
+            Title = "💎 Starting...",
+            Text = "Blox Fruits Ultimate v10.0",
+            Duration = 3,
+            Icon = "rbxassetid://4483345998"
+        })
+    end)
 end)
 
--- Load Script
+-- 5. Load Script (Anti-Cache & Error Handling)
+-- Adicionei '?t=' para evitar que o executor use uma versão antiga salva em cache
 local url = "https://raw.githubusercontent.com/Gui0494/BloxUltimateScript/main/main.lua"
 
 local success, err = pcall(function()
-    local script = game:HttpGet(url, true)
-    if script and #script > 100 then
-        loadstring(script)()
-    else
-        error("Invalid response")
+    -- Download
+    local scriptContent = game:HttpGet(url .. "?t=" .. tostring(tick()), true)
+    
+    if not scriptContent or #scriptContent < 10 then
+        error("Empty response from GitHub. Check URL/Privacy settings.")
     end
+
+    -- Compile
+    local func, syntaxErr = loadstring(scriptContent)
+    if not func then
+        error("Syntax Error in main.lua: " .. tostring(syntaxErr))
+    end
+
+    -- Execute
+    func()
 end)
 
+-- 6. Error Report
 if not success then
-    warn("[Loader] Failed: " .. tostring(err))
+    getgenv().BloxUltLoaded = nil -- Reseta para permitir tentar de novo
+    warn("[Loader] Critical Error: " .. tostring(err))
+    
     pcall(function()
         game:GetService("StarterGui"):SetCore("SendNotification", {
-            Title = "❌ Error",
-            Text = "Failed to load. Check URL!",
+            Title = "❌ Script Error",
+            Text = "Check F9 Console for details",
             Duration = 5
         })
     end)
-    getgenv().BloxUltLoaded = nil
 end
