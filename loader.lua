@@ -42,7 +42,7 @@ pcall(function()
 end)
 
 -- Load Script
-local url = "https://raw.githubusercontent.com/SEU_USUARIO/SEU_REPO/main/main.lua"
+local url = "https://raw.githubusercontent.com/Gui0494/BloxUltimateScript/main/main.lua"
 
 local success, err = pcall(function()
     local script = game:HttpGet(url, true)
