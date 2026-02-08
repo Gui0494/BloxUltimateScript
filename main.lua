@@ -1,8 +1,8 @@
 --[[
-    Blox Fruits Ultimate v14.2 SUPREME - Main Script
+    Blox Fruits Ultimate v14.3 SUPREME - Main Script
     Carregado pelo Loader.lua | NÃO execute diretamente!
     
-    v14.2 CHANGELOG:
+    v14.3 CHANGELOG:
     ✓ Server Hop system (menos lag, menos players)
     ✓ Auto Fruit Store / Eat / Sniper melhorado
     ✓ Mirage Island Detector
@@ -48,7 +48,7 @@ local Camera = Workspace.CurrentCamera
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
 -- ══════════════════════════════════════════════════════════════════════════════════════════
---                              CONFIG SAVE/LOAD SYSTEM (v14.2 NEW)
+--                              CONFIG SAVE/LOAD SYSTEM (v14.3 NEW)
 -- ══════════════════════════════════════════════════════════════════════════════════════════
 
 local ConfigManager = {}
@@ -90,9 +90,10 @@ local DefaultConfig = {
         Enabled = false,
         Mode = "Level",
         BringMobs = true,
-        FarmHeight = 25, -- studs above mobs
-        DipHeight = 8,   -- studs to dip down for click range
-        PullRange = 120,  -- studs to pull mobs from
+        FarmHeight = 25,
+        DipHeight = 8,
+        PullRange = 120,
+        AttackCycles = 8, -- quantas vezes ataca por ciclo antes de re-check
     },
     AutoQuest = { Enabled = true },
     Combat = {
@@ -234,7 +235,7 @@ local function humanDelay(mn, mx)
     task.wait((mn or 0.05) + math.random() * ((mx or 0.15) - (mn or 0.05)))
 end
 
--- v14.2: Random offset for positions (anti-detection)
+-- v14.3: Random offset for positions (anti-detection)
 local function randomOffset(cf, range)
     range = range or 3
     return cf * CFrame.new(math.random(-range, range), 0, math.random(-range, range))
@@ -318,7 +319,7 @@ function Core.SafeCall(f, ...)
     return ok, res
 end
 
--- v14.2: Improved SafeRemote with retry
+-- v14.3: Improved SafeRemote with retry
 function Core.SafeRemote(...)
     local remote = Core.GetRemote()
     if not remote then return false end
@@ -632,19 +633,29 @@ function Combat.EquipWeapon(wType)
     return w
 end
 
--- ═══ CLICK ATTACK (normal punch/click — NOT skills) ═══
--- Simula click do mouse na tela — hitbox grande com melee equipado
+-- ═══ CLICK NORMAL (mouse click — soco/espada) ═══
 function Combat.ClickAttack()
     VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
-    task.wait(0.08)
+    task.wait(0.06)
     VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
 end
 
--- ═══ BRING ALL MOBS — puxa TODOS os mobs na range pro player ═══
--- Funciona setando CFrame dos mobs todo frame pra perto do player
-function Combat.BringAllMobs(mobName, range)
-    local hrp = Core.GetHRP(); if not hrp then return 0 end
-    range = range or Config.AutoFarm.PullRange or 120
+-- ═══ AoE REMOTE ATTACK — acerta TODOS os mobs num ponto ═══
+-- MeleeAttack server-side tem hitbox grande, acerta tudo perto do targetCF
+function Combat.AoEAttack(targetCF)
+    if not targetCF then
+        local hrp = Core.GetHRP(); if not hrp then return end
+        targetCF = hrp.CFrame
+    end
+    Core.SafeRemote("MeleeAttack", targetCF, 1)
+end
+
+-- ═══ PULL MOBS — puxa TODOS os mobs pro ponto fixo no chão ═══
+-- groundCF = ponto FIXO no chão onde mobs serão agrupados (da QuestDB)
+-- NÃO usa posição do player nem do mob como referência
+function Combat.PullMobsToPoint(groundCF, mobName, range)
+    if not groundCF then return 0 end
+    range = range or Config.AutoFarm.PullRange
     local count = 0
     local enemies = Workspace:FindFirstChild("Enemies")
     if not enemies then return 0 end
@@ -653,32 +664,39 @@ function Combat.BringAllMobs(mobName, range)
         local mHum = mob:FindFirstChild("Humanoid")
         local mHRP = mob:FindFirstChild("HumanoidRootPart") or mob:FindFirstChild("Torso")
         if mHum and mHRP and mHum.Health > 0 then
-            -- Filter by mob name if specified
-            local nameMatch = (not mobName or mobName == "Auto" or mob.Name:lower():find(mobName:lower()))
+            local nameMatch = (not mobName or mobName == "" or mob.Name:lower():find(mobName:lower()))
             if nameMatch then
-                local dist = (hrp.Position - mHRP.Position).Magnitude
-                if dist <= range then
-                    -- Puxa o mob pra EMBAIXO do player (5 studs abaixo)
-                    pcall(function()
-                        mHRP.CFrame = hrp.CFrame * CFrame.new(
-                            math.random(-6, 6), -- random X offset
-                            -Config.AutoFarm.FarmHeight + 5, -- below player
-                            math.random(-6, 6) -- random Z offset
-                        )
-                        mHRP.Velocity = Vector3.zero
-                        mHRP.CanCollide = false
-                    end)
-                    count = count + 1
-                end
+                pcall(function()
+                    mHRP.CFrame = groundCF * CFrame.new(math.random(-3,3), 0, math.random(-3,3))
+                    mHRP.Velocity = Vector3.zero
+                    mHRP.CanCollide = false
+                end)
+                count = count + 1
             end
         end
     end
     return count
 end
 
--- Skill spamming (para uso FORA do farm, ex: bounty hunt, combo)
+-- Contar mobs vivos com nome
+function Combat.CountMobs(mobName)
+    local count = 0
+    local enemies = Workspace:FindFirstChild("Enemies")
+    if not enemies then return 0 end
+    for _, mob in pairs(enemies:GetChildren()) do
+        local mHum = mob:FindFirstChild("Humanoid")
+        if mHum and mHum.Health > 0 then
+            if not mobName or mobName == "" or mob.Name:lower():find(mobName:lower()) then
+                count = count + 1
+            end
+        end
+    end
+    return count
+end
+
+-- Skills (para Combo/PVP, NÃO para farm)
 function Combat.UseSkill(key)
-    VirtualInputManager:SendKeyEvent(true, key, false, game); humanDelay(0.05,0.1)
+    VirtualInputManager:SendKeyEvent(true, key, false, game); task.wait(0.06)
     VirtualInputManager:SendKeyEvent(false, key, false, game)
 end
 
@@ -688,8 +706,15 @@ function Combat.ExecuteCombo(target)
         if not Core.IsAlive() then break end
         local tH = target:FindFirstChild("Humanoid")
         if not tH or tH.Health <= 0 then break end
-        Combat.UseSkill(key)
-        task.wait(Config.Combo.Delay)
+        Combat.UseSkill(key); task.wait(Config.Combo.Delay)
+    end
+end
+
+-- Desabilitar colisão do character
+function Combat.DisableCollision()
+    local ch = Core.GetCharacter(); if not ch then return end
+    for _, p in pairs(ch:GetDescendants()) do
+        if p:IsA("BasePart") then p.CanCollide = false end
     end
 end
 
@@ -752,194 +777,163 @@ end
 function Targeting.GetTarget(mobName) return Targeting.SelectBest(Targeting.FilterName(Targeting.GetEnemies(), mobName)) end
 function Targeting.GetBoss(bossName) return Targeting.SelectBest(Targeting.FilterName(Targeting.GetBosses(), bossName)) end
 
--- Count alive mobs matching name in area
-function Targeting.CountAlive(mobName, range)
-    local hrp = Core.GetHRP(); if not hrp then return 0 end
-    range = range or 200; local c = 0
-    for _, e in ipairs(Targeting.FilterName(Targeting.GetEnemies(), mobName)) do
-        if Core.GetDistance(hrp, e) <= range then c = c + 1 end
-    end; return c
-end
-
--- ═══ AUTO FARM — REWRITTEN v14.2 ═══
--- Mecânica: Sobe → Puxa mobs → Desce (dip) → Click attack → Sobe
--- SEM skills (Z,X,C,V) — só soco normal com click
--- BringMobs funcional — puxa TODOS os mobs da quest toda frame
+-- ══════════════════════════════════════════════════════════════════════════════════════════
+--                          AUTO FARM v14.3 — REWRITTEN FROM SCRATCH
+-- ══════════════════════════════════════════════════════════════════════════════════════════
+-- COMO FUNCIONA:
+-- 1. Pega MobArea da QuestDB → essa é a posição FIXA no chão (NUNCA muda)
+-- 2. Player fica FIXO em MobArea + FarmHeight studs acima
+-- 3. Mobs são puxados pro chão (MobArea) toda iteração
+-- 4. Attack via Remote MeleeAttack no ponto do chão → hitbox AoE pega TODOS
+-- 5. Player NUNCA se move baseado em posição de mob (elimina teleport bug)
+-- 6. Usa task.spawn + while loop (NÃO Heartbeat) pra timing controlado
 
 local Farm = {}
 Farm.Status = "Idle"
-Farm.Phase = "idle" -- idle, traveling, pulling, dipping, attacking, rising
-Farm._anchorPos = nil -- posição base acima dos mobs
+Farm.Phase = "idle"
+Farm._running = false
 
 function Farm.AcceptQuest(qd)
     if not qd or not Core.IsAlive() then return false end
     local hrp = Core.GetHRP(); if not hrp then return false end
     local dist = Core.GetDistance(hrp.Position, qd.QuestNPC.Position)
-    if dist > 40 then
+    if dist > 15 then
         Farm.Status = "→ Quest NPC"
-        Movement.TweenTo(randomOffset(qd.QuestNPC, 2))
-        return false
-    else
-        Movement.StopTween()
-        Farm.Status = "Accepting Quest"
-        Core.SafeRemote("StartQuest", qd.QuestId, 1)
-        humanDelay(0.3, 0.5)
-        return true
-    end
-end
-
--- MAIN FARM FUNCTION — Yo-yo attack loop
-function Farm.FarmMobs(qd)
-    if not Core.IsAlive() then return end
-    local hrp = Core.GetHRP(); if not hrp then return end
-    local mobName = qd.MobName
-    
-    -- Encontra um mob pra saber onde ficar
-    local target = Targeting.GetTarget(mobName)
-    if not target then
-        -- Sem mobs — vai pra área e espera respawn
-        Farm.Status = "Waiting respawn..."
-        if qd.MobArea then
-            local dist = Core.GetDistance(hrp.Position, qd.MobArea.Position)
-            if dist > 80 then
-                Farm.Status = "→ Mob Area"
-                Movement.TweenTo(qd.MobArea * CFrame.new(0, Config.AutoFarm.FarmHeight, 0))
-            end
-        end
-        return
-    end
-    
-    local tHRP = target:FindFirstChild("HumanoidRootPart") or target:FindFirstChild("Torso")
-    if not tHRP then return end
-    
-    -- Posição base: acima do mob
-    local highPos = tHRP.CFrame * CFrame.new(0, Config.AutoFarm.FarmHeight, 0)
-    local dist = Core.GetDistance(hrp.Position, highPos.Position)
-    
-    -- Se tá longe, tween até lá
-    if dist > 60 then
-        Farm.Status = "→ " .. target.Name
         Farm.Phase = "traveling"
-        Movement.TweenTo(highPos)
-        return
+        Movement.TweenAwait(qd.QuestNPC * CFrame.new(0, 3, 0), Config.Movement.TweenSpeed)
+        task.wait(0.3)
     end
-    
-    -- Parar tween se tiver ativo
     Movement.StopTween()
-    
-    -- Equipar arma
-    Combat.EquipWeapon()
-    
-    -- ═══ FASE 1: POSICIONAR EM CIMA + PUXAR MOBS ═══
-    Farm.Phase = "pulling"
-    Farm.Status = "🧲 Pulling mobs (" .. Targeting.CountAlive(mobName, Config.AutoFarm.PullRange) .. ")"
-    
-    -- Ficar em cima (safe)
-    hrp.CFrame = highPos
-    
-    -- Puxar TODOS os mobs da area pro player
-    local pulled = Combat.BringAllMobs(mobName, Config.AutoFarm.PullRange)
-    
-    -- Desabilitar colisão do player (segurança)
-    local ch = Core.GetCharacter()
-    if ch then
-        for _, part in pairs(ch:GetDescendants()) do
-            if part:IsA("BasePart") then part.CanCollide = false end
-        end
-    end
-    
-    -- ═══ FASE 2: DIP DOWN + CLICK ATTACK ═══
-    if pulled > 0 then
-        Farm.Phase = "dipping"
-        -- Descer um pouco pra ficar na range do click
-        local dipPos = tHRP.CFrame * CFrame.new(0, Config.AutoFarm.DipHeight, 0)
-        hrp.CFrame = dipPos
-        
-        Farm.Phase = "attacking"
-        Farm.Status = "⚔ Clicking " .. pulled .. " mobs"
-        
-        -- Click attack múltiplas vezes (hitbox grande com melee)
-        for _ = 1, math.random(3, 5) do
-            if not Core.IsAlive() then break end
-            Combat.ClickAttack()
-            -- Re-puxar mobs enquanto ataca (mantém eles perto)
-            Combat.BringAllMobs(mobName, Config.AutoFarm.PullRange)
-            task.wait(0.08)
-        end
-        
-        -- ═══ FASE 3: SUBIR DE VOLTA (safe) ═══
-        Farm.Phase = "rising"
-        hrp.CFrame = highPos
-    end
+    Farm.Status = "Accepting Quest"
+    Core.SafeRemote("StartQuest", qd.QuestId, 1)
+    task.wait(0.5)
+    return Core.HasQuest()
 end
 
--- Main loop que roda no Heartbeat
-function Farm.MainLoop()
-    if not Config.AutoFarm.Enabled then Farm.Status = "Disabled"; return end
-    if not Core.IsAlive() then Farm.Status = "Dead..."; return end
+-- ═══ MAIN FARM COROUTINE ═══
+function Farm.FarmLoop()
+    Farm._running = true
     
-    local mode = Config.AutoFarm.Mode
-    local qd = QuestDB.GetQuest()
-    
-    if mode == "Level" then
-        -- Pegar quest se não tiver
-        if Config.AutoQuest.Enabled and not Core.HasQuest() then
-            Farm.AcceptQuest(qd)
-            return
+    while Farm._running and Config.AutoFarm.Enabled do
+        if not Core.IsAlive() then
+            Farm.Status = "Dead... waiting"
+            Farm.Phase = "dead"
+            repeat task.wait(0.5) until Core.IsAlive() or not Farm._running
+            task.wait(1) -- espera respawn completo
+            if not Farm._running then break end
         end
-        Farm.FarmMobs(qd)
         
-    elseif mode == "Mastery" then
-        -- Mastery não precisa de quest, só farm
-        Farm.FarmMobs(qd)
+        local qd = QuestDB.GetQuest()
+        if not qd then Farm.Status = "No quest data"; task.wait(1); continue end
         
-    elseif mode == "Boss" then
-        -- Tenta boss primeiro, senão farm normal
-        local bossTarget = Targeting.GetBoss(qd.BossName)
-        if bossTarget then
-            -- Boss farming — mesma mecânica mas foca no boss
-            local bossHRP = bossTarget:FindFirstChild("HumanoidRootPart")
-            if bossHRP then
-                local hrp = Core.GetHRP()
-                if hrp then
-                    local dist = Core.GetDistance(hrp, bossTarget)
-                    if dist > 60 then
-                        Farm.Status = "→ Boss: " .. bossTarget.Name
-                        Movement.TweenTo(bossHRP.CFrame * CFrame.new(0, Config.AutoFarm.FarmHeight, 0))
-                    else
-                        Movement.StopTween()
-                        Combat.EquipWeapon()
-                        hrp.CFrame = bossHRP.CFrame * CFrame.new(0, Config.AutoFarm.DipHeight, 0)
-                        Farm.Status = "⚔ Boss: " .. bossTarget.Name
-                        Combat.ClickAttack()
-                        task.wait(0.05)
-                        hrp.CFrame = bossHRP.CFrame * CFrame.new(0, Config.AutoFarm.FarmHeight, 0)
-                    end
-                end
+        -- ═══ STEP 1: PEGAR QUEST SE PRECISA ═══
+        if Config.AutoFarm.Mode == "Level" and Config.AutoQuest.Enabled and not Core.HasQuest() then
+            Farm.Phase = "quest"
+            Farm.Status = "Getting quest..."
+            local got = Farm.AcceptQuest(qd)
+            if not got then
+                task.wait(0.5)
+                -- Tenta de novo
+                Farm.AcceptQuest(qd)
+                task.wait(0.3)
             end
-        else
-            -- Sem boss, farm normal
-            if Config.AutoQuest.Enabled and not Core.HasQuest() then
-                Farm.AcceptQuest(qd); return
-            end
-            Farm.FarmMobs(qd)
+            task.wait(0.2)
+            continue
         end
+        
+        -- ═══ STEP 2: POSIÇÕES FIXAS (da QuestDB, NUNCA mudam) ═══
+        local groundCF = qd.MobArea           -- ponto FIXO no chão
+        local highCF = qd.MobArea * CFrame.new(0, Config.AutoFarm.FarmHeight, 0) -- player fica aqui
+        local attackCF = groundCF              -- mobs ficam aqui, atacamos aqui
+        
+        -- ═══ STEP 3: IR PRA ÁREA SE LONGE ═══
+        local hrp = Core.GetHRP()
+        if hrp then
+            local dist = Core.GetDistance(hrp.Position, highCF.Position)
+            if dist > 60 then
+                Farm.Status = "→ " .. qd.MobName .. " area"
+                Farm.Phase = "traveling"
+                Movement.TweenAwait(highCF, Config.Movement.TweenSpeed)
+                task.wait(0.2)
+                continue
+            end
+        end
+        
+        -- ═══ STEP 4: VERIFICAR SE TEM MOBS VIVOS ═══
+        local mobCount = Combat.CountMobs(qd.MobName)
+        if mobCount == 0 then
+            -- Sem mobs, ficar no alto e esperar respawn
+            Farm.Status = "Waiting respawn... (0 mobs)"
+            Farm.Phase = "waiting"
+            hrp = Core.GetHRP()
+            if hrp then hrp.CFrame = highCF end
+            Combat.DisableCollision()
+            task.wait(0.5)
+            continue
+        end
+        
+        -- ═══ STEP 5: EQUIPAR ARMA ═══
+        Combat.EquipWeapon()
+        
+        -- ═══ STEP 6: POSICIONAR PLAYER NO ALTO (FIXO) ═══
+        Farm.Phase = "farming"
+        hrp = Core.GetHRP()
+        if not hrp then task.wait(0.2); continue end
+        
+        Movement.StopTween()
+        hrp.CFrame = highCF   -- player FIXO no alto
+        Combat.DisableCollision()
+        
+        -- ═══ STEP 7: PUXAR MOBS + ATACAR (loop rápido) ═══
+        Farm.Status = "⚔ Farming " .. mobCount .. "x " .. qd.MobName
+        
+        -- Fast attack loop: puxa + ataca várias vezes por ciclo
+        for i = 1, Config.AutoFarm.AttackCycles do
+            if not Farm._running or not Config.AutoFarm.Enabled or not Core.IsAlive() then break end
+            
+            -- Puxar todos os mobs pro ponto FIXO no chão
+            local pulled = Combat.PullMobsToPoint(attackCF, qd.MobName, Config.AutoFarm.PullRange)
+            
+            if pulled == 0 then break end -- mobs morreram
+            
+            -- Manter player FIXO no alto
+            hrp = Core.GetHRP()
+            if hrp then
+                hrp.CFrame = highCF
+                Combat.DisableCollision()
+            end
+            
+            -- Atacar com Remote AoE (hitbox no ponto dos mobs)
+            Combat.AoEAttack(attackCF)
+            
+            -- Também click attack (pra garantir)
+            Combat.ClickAttack()
+            
+            task.wait(0.1) -- intervalo entre ataques
+        end
+        
+        -- Ciclo completo, pequena pausa antes de repetir
+        task.wait(0.15)
     end
+    
+    Farm._running = false
+    Farm.Status = "Stopped"
+    Farm.Phase = "idle"
 end
 
 function Farm.Start()
+    if Farm._running then return end -- já tá rodando
     Core.Notify("🌾 Farm", "ON - " .. Config.AutoFarm.Mode, 3)
-    -- Farm loop roda ~30fps (Heartbeat) com throttle
-    local th = createThrottle(0.05) -- ~20 ticks/sec
-    Connections:Add("FarmLoop", RunService.Heartbeat:Connect(function()
-        if not th() then return end
-        Core.SafeCall(Farm.MainLoop)
-    end))
+    task.spawn(Farm.FarmLoop) -- roda em coroutine separada
 end
 
 function Farm.Stop()
-    Connections:Remove("FarmLoop")
+    Farm._running = false
+    Config.AutoFarm.Enabled = false
     Movement.StopTween()
+    -- Desancorar player
+    local hrp = Core.GetHRP()
+    if hrp then hrp.Anchored = false end
     Farm.Status = "Stopped"
     Farm.Phase = "idle"
     Core.Notify("🌾 Farm", "OFF", 2)
@@ -958,55 +952,66 @@ function KillAura.Enable(on)
             if not Config.KillAura.Enabled or not Core.IsAlive() or not th() then return end
             local hrp = Core.GetHRP(); if not hrp then return end
             Combat.EquipWeapon()
+            local gatherCF = hrp.CFrame * CFrame.new(0, -5, 0)
             local hit = 0
             for _, enemy in ipairs(Targeting.GetEnemies()) do
                 if hit >= Config.KillAura.MaxTargets then break end
                 if Core.GetDistance(hrp, enemy) <= Config.KillAura.Radius then
                     local eHRP = enemy:FindFirstChild("HumanoidRootPart") or enemy:FindFirstChild("Torso")
                     if eHRP then
-                        -- Puxa mob pra perto + click attack
-                        pcall(function() eHRP.CFrame = hrp.CFrame * CFrame.new(math.random(-5,5), -3, math.random(-5,5)) end)
+                        pcall(function()
+                            eHRP.CFrame = gatherCF * CFrame.new(math.random(-3,3), 0, math.random(-3,3))
+                            eHRP.Velocity = Vector3.zero
+                        end)
                         hit = hit + 1
                     end
                 end
             end
-            -- Click attack pra pegar todos que foram puxados
-            if hit > 0 then Combat.ClickAttack() end
+            if hit > 0 then
+                Combat.AoEAttack(gatherCF)
+                Combat.ClickAttack()
+            end
         end))
         Core.Notify("💀 Kill Aura", "ON | R:" .. Config.KillAura.Radius, 3)
     else Connections:Remove("KillAura"); Core.Notify("💀 Kill Aura", "OFF", 2) end
 end
 
--- v14.2: Mob Aura - puxa mobs pra perto + ataca em AoE
+-- Mob Aura - puxa mobs pra perto + ataca em AoE
 local MobAura = {}
 function MobAura.Enable(on)
     Config.MobAura.Enabled = on
     if on then
-        local th = createThrottle(0.2)
+        local th = createThrottle(0.15)
         Connections:Add("MobAura", RunService.Heartbeat:Connect(function()
             if not Config.MobAura.Enabled or not Core.IsAlive() or not th() then return end
             local hrp = Core.GetHRP(); if not hrp then return end
+            local gatherCF = hrp.CFrame * CFrame.new(0, -3, 0)
             local pulled = 0
             for _, enemy in ipairs(Targeting.GetEnemies()) do
-                if pulled >= 10 then break end
-                local dist = Core.GetDistance(hrp, enemy)
-                if dist <= Config.MobAura.PullRadius then
+                if pulled >= 15 then break end
+                if Core.GetDistance(hrp, enemy) <= Config.MobAura.PullRadius then
                     local eHRP = enemy:FindFirstChild("HumanoidRootPart")
                     if eHRP then
-                        pcall(function() eHRP.CFrame = hrp.CFrame * CFrame.new(math.random(-8,8), 0, math.random(-8,8)) end)
+                        pcall(function()
+                            eHRP.CFrame = gatherCF * CFrame.new(math.random(-4,4), 0, math.random(-4,4))
+                            eHRP.Velocity = Vector3.zero
+                        end)
                         pulled = pulled + 1
                     end
                 end
             end
-            -- Click attack depois de puxar todos
-            if pulled > 0 then Combat.EquipWeapon(); Combat.ClickAttack() end
+            if pulled > 0 then
+                Combat.EquipWeapon()
+                Combat.AoEAttack(gatherCF)
+                Combat.ClickAttack()
+            end
         end))
         Core.Notify("🧲 Mob Aura", "ON | R:" .. Config.MobAura.PullRadius, 3)
     else Connections:Remove("MobAura"); Core.Notify("🧲 Mob Aura", "OFF", 2) end
 end
 
 -- ══════════════════════════════════════════════════════════════════════════════════════════
---                          DODGE SYSTEM (v14.2 NEW)
+--                          DODGE SYSTEM (v14.3 NEW)
 -- ══════════════════════════════════════════════════════════════════════════════════════════
 
 local DodgeSystem = {}
@@ -1147,7 +1152,7 @@ function SeaChange.Enable(on)
 end
 
 -- ══════════════════════════════════════════════════════════════════════════════════════════
---                       SERVER HOP SYSTEM (v14.2 NEW)
+--                       SERVER HOP SYSTEM (v14.3 NEW)
 -- ══════════════════════════════════════════════════════════════════════════════════════════
 
 local ServerHop = {}
@@ -1203,7 +1208,7 @@ function ServerHop.HopRandom()
 end
 
 -- ══════════════════════════════════════════════════════════════════════════════════════════
---                    MIRAGE ISLAND DETECTOR (v14.2 NEW)
+--                    MIRAGE ISLAND DETECTOR (v14.3 NEW)
 -- ══════════════════════════════════════════════════════════════════════════════════════════
 
 local MirageDetector = {}
@@ -1258,7 +1263,7 @@ function Extras.EnableAutoHaki(on)
     else Connections:Remove("AutoHaki"); Core.Notify("✊ Armament Haki", "OFF", 2) end
 end
 
--- ═══ OBSERVATION HAKI (Ken Haki) — v14.2 NEW ═══
+-- ═══ OBSERVATION HAKI (Ken Haki) — v14.3 NEW ═══
 -- Ativa Observation Haki (Ken/Kenbunshoku)
 -- Usa tecla "J" do jogo ou remote "Ken" / "Observation"
 -- Mostra inimigos através de paredes + dodge automático
@@ -1303,7 +1308,7 @@ function Extras.EnableObservationHaki(on)
     end
 end
 
--- v14.2: Auto Heal - uses food items when HP is low
+-- v14.3: Auto Heal - uses food items when HP is low
 function Extras.EnableAutoHeal(on)
     Config.Extras.AutoHeal = on
     if on then
@@ -1341,7 +1346,7 @@ function Extras.EnableFruitSniper(on)
                     Core.Notify("🍎 FRUIT!", obj.Name, 5)
                     Movement.TeleportTo(h.CFrame * CFrame.new(0,2,0)); task.wait(0.3)
                     local pr = h:FindFirstChildOfClass("ProximityPrompt"); if pr then pcall(function() fireproximityprompt(pr) end) end
-                    -- v14.2: Auto eat or store
+                    -- v14.3: Auto eat or store
                     task.wait(0.5)
                     if Config.Fruit.AutoEat then Core.SafeRemote("EatFruit", obj.Name)
                     elseif Config.Fruit.AutoStore then Core.SafeRemote("StoreFruit", obj.Name) end
@@ -1406,7 +1411,7 @@ function Extras.EnableAutoStats(on) Config.Player.AutoStats = on; if on then loc
 
 function Extras.EnableAutoCollect(on) Config.Extras.AutoCollect = on; if on then local th = createThrottle(1); Connections:Add("AutoCollect", RunService.Heartbeat:Connect(function() if not Config.Extras.AutoCollect or not th() then return end; local hrp = Core.GetHRP(); if not hrp then return end; for _, obj in pairs(Workspace:GetDescendants()) do if obj:IsA("ProximityPrompt") and obj.Enabled then local part = obj.Parent; if part and part:IsA("BasePart") and Core.GetDistance(hrp, part) < 15 then pcall(function() fireproximityprompt(obj) end) end end end end)) else Connections:Remove("AutoCollect") end end
 
--- v14.2: Auto Race upgrade
+-- v14.3: Auto Race upgrade
 function Extras.EnableAutoRace(on)
     Config.Player.AutoRace = on
     if on then
@@ -1439,7 +1444,7 @@ function StatusHUD.Create()
         l.BackgroundTransparency = 1; l.TextColor3 = c or Color3.fromRGB(200,200,220); l.TextSize = sz or 11
         l.Font = Enum.Font.Gotham; l.TextXAlignment = Enum.TextXAlignment.Left; l.Parent = frame; return l
     end
-    local tL = lbl("T",5,Color3.fromRGB(255,215,0),13); tL.Text = "🎮 BF Ultimate v14.2 Supreme"; tL.Font = Enum.Font.GothamBold
+    local tL = lbl("T",5,Color3.fromRGB(255,215,0),13); tL.Text = "🎮 BF Ultimate v14.3 Supreme"; tL.Font = Enum.Font.GothamBold
     local mL = lbl("M",23); local sL = lbl("S",39,Color3.fromRGB(150,150,170)); local lvL = lbl("L",55,Color3.fromRGB(150,150,170))
     local aL = lbl("A",71,Color3.fromRGB(150,150,170)); local rL = lbl("R",87,Color3.fromRGB(150,150,170))
     local bL = lbl("B",103,Color3.fromRGB(150,150,170)); local svL = lbl("SV",119,Color3.fromRGB(150,150,170))
@@ -1490,7 +1495,7 @@ local function LoadUI()
     local ok, OrionLib = pcall(function() return loadstring(game:HttpGet('https://raw.githubusercontent.com/jensonhirst/Orion/main/source'))() end)
     if not ok then Core.Notify("❌ Error", "UI failed!", 5); return end
 
-    local W = OrionLib:MakeWindow({Name = "🎮 Blox Fruits Ultimate v14.2 SUPREME", HidePremium = false, SaveConfig = true, ConfigFolder = "BFUltimateV14", IntroEnabled = false})
+    local W = OrionLib:MakeWindow({Name = "🎮 Blox Fruits Ultimate v14.3 SUPREME", HidePremium = false, SaveConfig = true, ConfigFolder = "BFUltimateV14", IntroEnabled = false})
 
     -- ═══ MAIN TAB ═══
     local T1 = W:MakeTab({Name = "🏠 Main", Icon = "rbxassetid://7734053495"})
@@ -1501,28 +1506,29 @@ local function LoadUI()
     T1:AddDropdown({Name = "Weapon", Default = "Melee", Options = {"Melee","Sword","Blox Fruit","Gun"}, Callback = function(v) Config.Combat.Weapon = v end})
     T1:AddDropdown({Name = "Target Priority", Default = "Nearest", Options = {"Nearest","Lowest HP","Highest HP"}, Callback = function(v) Config.Combat.TargetPriority = v end})
     T1:AddToggle({Name = "🧲 Bring Mobs (Pull All)", Default = true, Callback = function(v) Config.AutoFarm.BringMobs = v end})
-    T1:AddSlider({Name = "Farm Height (studs)", Min = 10, Max = 50, Default = 25, Callback = function(v) Config.AutoFarm.FarmHeight = v end})
-    T1:AddSlider({Name = "Dip Height (attack)", Min = 3, Max = 20, Default = 8, Callback = function(v) Config.AutoFarm.DipHeight = v end})
-    T1:AddSlider({Name = "Pull Range", Min = 50, Max = 300, Default = 120, Callback = function(v) Config.AutoFarm.PullRange = v end})
-    T1:AddParagraph("How it works", "Sobe → Puxa mobs → Desce → Click attack → Sobe (loop seguro, sem skills)")
+    T1:AddSlider({Name = "Farm Height (studs)", Min = 10, Max = 50, Default = 25, Increment = 1, Callback = function(v) Config.AutoFarm.FarmHeight = v end})
+    T1:AddSlider({Name = "Dip Height (attack)", Min = 3, Max = 20, Default = 8, Increment = 1, Callback = function(v) Config.AutoFarm.DipHeight = v end})
+    T1:AddSlider({Name = "Pull Range", Min = 50, Max = 300, Default = 120, Increment = 1, Callback = function(v) Config.AutoFarm.PullRange = v end})
+    T1:AddSlider({Name = "Attack Speed (cycles)", Min = 3, Max = 20, Default = 8, Increment = 1, Callback = function(v) Config.AutoFarm.AttackCycles = v end})
+    T1:AddParagraph("How it works", "Player FIXO no alto | Mobs puxados pro chão | AoE Remote pega TODOS | Sem teleporting")
 
     -- ═══ COMBAT TAB ═══
     local T2 = W:MakeTab({Name = "⚔️ Combat", Icon = "rbxassetid://7734053495"})
     T2:AddToggle({Name = "💀 Kill Aura", Default = false, Callback = function(v) KillAura.Enable(v) end})
-    T2:AddSlider({Name = "Aura Radius", Min = 20, Max = 150, Default = 60, Callback = function(v) Config.KillAura.Radius = v end})
-    T2:AddSlider({Name = "Max Targets", Min = 1, Max = 15, Default = 5, Callback = function(v) Config.KillAura.MaxTargets = v end})
+    T2:AddSlider({Name = "Aura Radius", Min = 20, Max = 150, Default = 60, Increment = 1, Callback = function(v) Config.KillAura.Radius = v end})
+    T2:AddSlider({Name = "Max Targets", Min = 1, Max = 15, Default = 5, Increment = 1, Callback = function(v) Config.KillAura.MaxTargets = v end})
     T2:AddToggle({Name = "🧲 Mob Aura (Pull+Attack)", Default = false, Callback = function(v) MobAura.Enable(v) end})
-    T2:AddSlider({Name = "Pull Radius", Min = 30, Max = 200, Default = 80, Callback = function(v) Config.MobAura.PullRadius = v end})
+    T2:AddSlider({Name = "Pull Radius", Min = 30, Max = 200, Default = 80, Increment = 1, Callback = function(v) Config.MobAura.PullRadius = v end})
     T2:AddToggle({Name = "🛡️ Auto Dodge", Default = false, Callback = function(v) DodgeSystem.Enable(v) end})
-    T2:AddSlider({Name = "Dodge HP%", Min = 10, Max = 50, Default = 30, Callback = function(v) Config.Dodge.HPThreshold = v end})
+    T2:AddSlider({Name = "Dodge HP%", Min = 10, Max = 50, Default = 30, Increment = 1, Callback = function(v) Config.Dodge.HPThreshold = v end})
     T2:AddToggle({Name = "🔗 Combo System", Default = false, Callback = function(v) Config.Combo.Enabled = v end})
-    T2:AddSlider({Name = "Combo Delay", Min = 5, Max = 50, Default = 15, Callback = function(v) Config.Combo.Delay = v/100 end})
+    T2:AddSlider({Name = "Combo Delay", Min = 5, Max = 50, Default = 15, Increment = 1, Callback = function(v) Config.Combo.Delay = v/100 end})
 
     -- ═══ PVP TAB ═══
     local T2b = W:MakeTab({Name = "🏴‍☠️ PVP", Icon = "rbxassetid://7734053495"})
     T2b:AddToggle({Name = "🏴‍☠️ Bounty Hunt", Default = false, Callback = function(v) BountyHunt.Enable(v) end})
-    T2b:AddSlider({Name = "Min Bounty ($)", Min = 10000, Max = 500000, Default = 50000, Callback = function(v) Config.BountyHunt.MinBounty = v end})
-    T2b:AddSlider({Name = "Hunt Range", Min = 100, Max = 2000, Default = 500, Callback = function(v) Config.BountyHunt.MaxDistance = v end})
+    T2b:AddSlider({Name = "Min Bounty ($)", Min = 10000, Max = 500000, Default = 50000, Increment = 1, Callback = function(v) Config.BountyHunt.MinBounty = v end})
+    T2b:AddSlider({Name = "Hunt Range", Min = 100, Max = 2000, Default = 500, Increment = 1, Callback = function(v) Config.BountyHunt.MaxDistance = v end})
     T2b:AddToggle({Name = "👥 Player ESP", Default = false, Callback = function(v) Extras.EnablePlayerESP(v) end})
 
     -- ═══ RAID TAB ═══
@@ -1541,17 +1547,17 @@ local function LoadUI()
     T4:AddDropdown({Name = "📍 Third Sea", Default = TeleportOptions["Third Sea"][1], Options = TeleportOptions["Third Sea"], Callback = function(v) Movement.TweenTo(Teleports["Third Sea"][v]) end})
     T4:AddButton({Name = "🔄 Server Hop (Low Pop)", Callback = function() ServerHop.HopToLowest() end})
     T4:AddButton({Name = "🎲 Server Hop (Random)", Callback = function() ServerHop.HopRandom() end})
-    T4:AddSlider({Name = "Max Players (Hop)", Min = 1, Max = 30, Default = 20, Callback = function(v) Config.ServerHop.MaxPlayers = v end})
+    T4:AddSlider({Name = "Max Players (Hop)", Min = 1, Max = 30, Default = 20, Increment = 1, Callback = function(v) Config.ServerHop.MaxPlayers = v end})
 
     -- ═══ MOVEMENT TAB ═══
     local T5 = W:MakeTab({Name = "🚀 Movement", Icon = "rbxassetid://7733960981"})
     T5:AddToggle({Name = "✈️ Fly", Default = false, Callback = function(v) Movement.EnableFly(v) end})
-    T5:AddSlider({Name = "Fly Speed", Min = 50, Max = 500, Default = 150, Callback = function(v) Config.Movement.FlySpeed = v end})
+    T5:AddSlider({Name = "Fly Speed", Min = 50, Max = 500, Default = 150, Increment = 1, Callback = function(v) Config.Movement.FlySpeed = v end})
     T5:AddToggle({Name = "👻 Noclip", Default = false, Callback = function(v) Movement.EnableNoclip(v) end})
     T5:AddToggle({Name = "🦘 Infinite Jump", Default = false, Callback = function(v) Movement.EnableInfJump(v) end})
-    T5:AddSlider({Name = "Tween Speed", Min = 100, Max = 1000, Default = 300, Callback = function(v) Config.Movement.TweenSpeed = v end})
-    T5:AddSlider({Name = "Walk Speed", Min = 16, Max = 200, Default = 16, Callback = function(v) Movement.SetSpeed(v, nil) end})
-    T5:AddSlider({Name = "Jump Power", Min = 50, Max = 300, Default = 50, Callback = function(v) Movement.SetSpeed(nil, v) end})
+    T5:AddSlider({Name = "Tween Speed", Min = 100, Max = 1000, Default = 300, Increment = 1, Callback = function(v) Config.Movement.TweenSpeed = v end})
+    T5:AddSlider({Name = "Walk Speed", Min = 16, Max = 200, Default = 16, Increment = 1, Callback = function(v) Movement.SetSpeed(v, nil) end})
+    T5:AddSlider({Name = "Jump Power", Min = 50, Max = 300, Default = 50, Increment = 1, Callback = function(v) Movement.SetSpeed(nil, v) end})
 
     -- ═══ PLAYER TAB ═══
     local T6 = W:MakeTab({Name = "👤 Player", Icon = "rbxassetid://7734053495"})
@@ -1595,7 +1601,7 @@ local function LoadUI()
     T8:AddButton({Name = "🔄 Rejoin Server", Callback = function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end})
     T8:AddParagraph("Keybinds", "F1: Farm | F2: Fly | F3: Kill Aura | F4: Stop All | F5: Mob Aura")
     T8:AddParagraph("Connections", "Active: " .. Connections:Count())
-    T8:AddLabel("🎮 v14.2 SUPREME | Premium Script")
+    T8:AddLabel("🎮 v14.3 SUPREME | Premium Script")
 
     OrionLib:Init(); Extras.EnableAntiAFK(true)
 end
@@ -1623,11 +1629,11 @@ end)
 
 SetupKeybinds(); StatusHUD.Create(); LoadUI()
 
-Core.Notify("✅ Loaded!", "v14.2 SUPREME | Lvl: " .. Core.GetLevel() .. " | " .. Core.GetWorldName(), 5)
+Core.Notify("✅ Loaded!", "v14.3 SUPREME | Lvl: " .. Core.GetLevel() .. " | " .. Core.GetWorldName(), 5)
 
 print([[
 ╔══════════════════════════════════════════════════════════════════════════════════════════╗
-║                    BLOX FRUITS ULTIMATE v14.2 SUPREME - LOADED                           ║
+║                    BLOX FRUITS ULTIMATE v14.3 SUPREME - LOADED                           ║
 ║  F1=Farm | F2=Fly | F3=Aura | F4=Stop | F5=MobAura                                    ║
 ║  New: ServerHop • MobAura • Dodge • Combo • Mirage • AutoHeal • ConfigSave             ║
 ╚══════════════════════════════════════════════════════════════════════════════════════════╝
